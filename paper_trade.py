@@ -14,6 +14,7 @@ from twdt.data import realtime
 from twdt.data.stats import QuoteStats
 from twdt.logutil import file_logger
 from twdt.paper.engine import PaperTrader
+from twdt.paper.portfolio import CapitalGuard
 from twdt.paper.journal import save_trades
 from twdt.report.metrics import summarize
 from twdt.risk.rules import RiskConfig
@@ -37,6 +38,8 @@ def main():
     ap.add_argument("--market", choices=["tse", "otc"], default="tse")
     ap.add_argument("--or-minutes", type=int, default=15)
     ap.add_argument("--fee-discount", type=float, default=0.6)
+    ap.add_argument("--capital", type=float, default=300000.0,
+                    help="單日買賣額度(元):一天內所有進場金額累計不可超過此值,平倉不退還額度")
     ap.add_argument("--flush-every", type=float, default=300.0, help="定期存檔間隔(秒)")
     args = ap.parse_args()
     if args.interval < 5:
@@ -46,8 +49,11 @@ def main():
     log(f"開始模擬單 {args.symbols} market={args.market} interval={args.interval}s log={log.path}")
     cost, risk = CostModel(fee_discount=args.fee_discount), RiskConfig()
     started_at = pd.Timestamp.now(tz=live.TZ).tz_localize(None)
+    guard = CapitalGuard(args.capital)
+    log(f"單日買賣額度 {guard.limit:,.0f}(進場金額逐筆累計、平倉不退還);每筆 {risk.shares_per_trade} 股")
     traders = {s: PaperTrader(s, opening_range_breakout(args.or_minutes), cost, risk,
-                              started_at=started_at, on_event=log) for s in args.symbols}
+                              started_at=started_at, guard=guard, on_event=log)
+               for s in args.symbols}
     day = pd.Timestamp.now(tz=live.TZ).strftime("%Y-%m-%d")
     recorders = {s: realtime.DayRecorder(s) for s in args.symbols}
     stats = QuoteStats()
@@ -86,6 +92,8 @@ def main():
             all_trades += t.trades
         path = save_trades(all_trades, day)
         log(f"成交紀錄: {path}")
+        for line in guard.summary_lines():
+            log(line)
         report_stats(stats, session_started, log)
         for k, v in summarize(all_trades).items():
             log(f"{k:>20}: {v:,.2f}" if isinstance(v, float) else f"{k:>20}: {v}")

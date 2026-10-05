@@ -150,3 +150,25 @@ def test_paper_trade_script_logs_logic_error_then_saves_and_raises(monkeypatch, 
     text = next((tmp_path / "logs").glob("paper_*.log")).read_text(encoding="utf-8")
     assert "[error]" in text and "bug in trading logic" in text
     assert (tmp_path / "realtime" / "2330_2026-10-05.parquet").exists()
+
+
+def test_paper_trade_script_capital_option_blocks_oversized_entry(monkeypatch, tmp_path):
+    def fake_poll(symbols, market, interval, handler, **kw):
+        for i, (t, p) in enumerate(_breakout_quotes()):
+            handler({"symbol": "2330", "ts": T(f"2026-10-05 {t}"), "price": p, "cum_volume": 1000 + i})
+
+    _run_script(monkeypatch, tmp_path, fake_poll, extra_argv=("--capital", "50000"))
+    paper_trade.main()                                  # 一張約 10 萬 > 5 萬上限,不可進場
+    assert journal.load_trades(tmp_path / "paper").empty
+    text = next((tmp_path / "logs").glob("paper_*.log")).read_text(encoding="utf-8")
+    assert "單日買賣額度 50,000" in text and "單日額度不足" in text and "略過 1 次訊號" in text
+
+
+def test_paper_trade_script_default_capital_is_300k(monkeypatch, tmp_path):
+    def fake_poll(symbols, market, interval, handler, **kw):
+        pass
+
+    _run_script(monkeypatch, tmp_path, fake_poll)
+    paper_trade.main()
+    text = next((tmp_path / "logs").glob("paper_*.log")).read_text(encoding="utf-8")
+    assert "單日買賣額度 300,000" in text and "今日已用 0" in text

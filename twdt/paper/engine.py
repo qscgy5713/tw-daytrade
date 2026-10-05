@@ -20,6 +20,7 @@ import pandas as pd
 from twdt.backtest.costs import CostModel
 from twdt.backtest.engine import SignalFn, Trade
 from twdt.data.realtime import MinuteBarBuilder
+from twdt.paper.portfolio import CapitalGuard
 from twdt.risk.rules import RiskConfig, stop_price, target_price
 
 
@@ -27,6 +28,7 @@ class PaperTrader:
     def __init__(self, symbol: str, signal_fn: SignalFn, cost: CostModel, risk: RiskConfig,
                  session_open: dtime = dtime(9, 0),
                  started_at: Optional[pd.Timestamp] = None,
+                 guard: Optional[CapitalGuard] = None,
                  on_event: Callable[[str], None] = lambda msg: None):
         self.symbol = symbol
         self.signal_fn = signal_fn
@@ -36,6 +38,8 @@ class PaperTrader:
         # 程式啟動時間(台灣當地、naive);用來判斷開盤區間資料是否完整,
         # 不能用「第一筆報價時間」,因為冷門股可能晚幾分鐘才有第一筆成交
         self.started_at = started_at
+        # 單日買賣額度(多個 PaperTrader 共用同一個 guard);None 表示不檢查
+        self.guard = guard
         self.on_event = on_event
         self.builder = MinuteBarBuilder()
         self.trades: List[Trade] = []
@@ -104,6 +108,7 @@ class PaperTrader:
                 continue
             direction = self.signal_fn(frame[frame.index <= bar["time"]])
             if direction != 0:
+                # 訊號只取第一個;額度不足被略過也算用掉(不改拿後面的 bar 的訊號補進場)
                 self._enter(ts, price, direction)
                 return
 
@@ -113,6 +118,11 @@ class PaperTrader:
 
     def _enter(self, ts: pd.Timestamp, price: float, direction: int) -> None:
         entry = self.cost.fill_price(price, "buy" if direction == 1 else "sell")
+        notional = entry * self.risk.shares_per_trade
+        if self.guard is not None and not self.guard.try_reserve(self.symbol, notional, ts):
+            self.on_event(f"[{self.symbol}] {ts.time()} 訊號略過:單日額度不足"
+                          f"(今日已用 {self.guard.used:,.0f} + 本筆 {notional:,.0f} > 上限 {self.guard.limit:,.0f})")
+            return
         self.position = {"direction": direction, "entry": entry, "entry_time": ts,
                          "stop": stop_price(entry, direction, self.risk),
                          "target": target_price(entry, direction, self.risk)}
@@ -147,6 +157,8 @@ class PaperTrader:
         self.trades.append(trade)
         self.realized_pnl += trade.net_pnl
         self.position = None
+        if self.guard is not None:
+            self.guard.release(self.symbol)
         self._last_exit_minute = ts.floor("min")
         self.on_event(f"[{self.symbol}] {ts.time()} 出場({reason}) @ {exit_price:.2f}"
                       f" 淨損益 {trade.net_pnl:,.0f}")
