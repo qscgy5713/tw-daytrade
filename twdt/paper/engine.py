@@ -120,8 +120,9 @@ class PaperTrader:
         entry = self.cost.fill_price(price, "buy" if direction == 1 else "sell")
         notional = entry * self.risk.shares_per_trade
         if self.guard is not None and not self.guard.try_reserve(self.symbol, notional, ts):
+            need = notional * (2 if self.guard.count_both_legs else 1)
             self.on_event(f"[{self.symbol}] {ts.time()} 訊號略過:單日額度不足"
-                          f"(今日已用 {self.guard.used:,.0f} + 本筆 {notional:,.0f} > 上限 {self.guard.limit:,.0f})")
+                          f"(今日已用 {self.guard.used:,.0f} + 本筆需 {need:,.0f} > 上限 {self.guard.limit:,.0f})")
             return
         self.position = {"direction": direction, "entry": entry, "entry_time": ts,
                          "stop": stop_price(entry, direction, self.risk),
@@ -158,7 +159,7 @@ class PaperTrader:
         self.realized_pnl += trade.net_pnl
         self.position = None
         if self.guard is not None:
-            self.guard.release(self.symbol)
+            self.guard.release(self.symbol, exit_notional=exit_price * shares)
         self._last_exit_minute = ts.floor("min")
         self.on_event(f"[{self.symbol}] {ts.time()} 出場({reason}) @ {exit_price:.2f}"
                       f" 淨損益 {trade.net_pnl:,.0f}")

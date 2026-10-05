@@ -15,7 +15,7 @@ def ts(hhmmss, day="2026-10-05"):
 
 
 def test_guard_is_cumulative_and_release_does_not_refund():
-    g = CapitalGuard(100_000)
+    g = CapitalGuard(100_000, count_both_legs=False)
     assert g.try_reserve("A", 60_000) is True
     assert g.try_reserve("B", 40_000) is True            # 剛好等於上限:允許
     assert g.used == 100_000 and g.entries == 2 and g.remaining == 0
@@ -28,7 +28,7 @@ def test_guard_is_cumulative_and_release_does_not_refund():
 
 
 def test_same_symbol_reentry_consumes_quota_again():
-    g = CapitalGuard(100_000)
+    g = CapitalGuard(100_000, count_both_legs=False)
     assert g.try_reserve("A", 40_000)
     g.release("A")
     assert g.try_reserve("A", 40_000)                    # 停損後再進場:要再扣一次
@@ -47,7 +47,7 @@ def test_guard_rejects_invalid_limit_and_double_entry_while_open():
 
 
 def test_summary_lines_mentions_rejections():
-    g = CapitalGuard(50_000)
+    g = CapitalGuard(50_000, count_both_legs=False)
     g.try_reserve("A", 40_000)
     g.try_reserve("B", 40_000, ts("09:20:05"))
     text = "\n".join(g.summary_lines())
@@ -67,7 +67,7 @@ def feed(tr, ticks):
 
 
 def test_second_symbol_is_rejected_when_quota_is_exhausted():
-    guard = CapitalGuard(100_000)                        # 價格 100 x 1000 股 = 10 萬,只夠一次進場
+    guard = CapitalGuard(100_000, count_both_legs=False)  # 價格 100 x 1000 股 = 10 萬,只夠一次進場
     events = []
     a = _always_long_trader("A", guard, events)
     b = _always_long_trader("B", guard, events)
@@ -82,7 +82,7 @@ def test_second_symbol_is_rejected_when_quota_is_exhausted():
 
 
 def test_quota_is_not_returned_after_exit_so_nobody_can_enter_again():
-    guard = CapitalGuard(150_000)                        # 只夠一次 10 萬的進場
+    guard = CapitalGuard(150_000, count_both_legs=False)  # 只夠一次 10 萬的進場
     a = _always_long_trader("A", guard, stop_loss_pct=0.01)
     b = _always_long_trader("B", guard, stop_loss_pct=0.01)
     for tr in (a, b):
@@ -117,7 +117,7 @@ def test_single_entry_larger_than_limit_never_happens():
 
 
 def test_notional_uses_slippage_adjusted_entry_price_and_counts_shorts():
-    guard = CapitalGuard(1_000_000)
+    guard = CapitalGuard(1_000_000, count_both_legs=False)
     cost = CostModel(fee_discount=1.0, slippage_ticks=1)
     short = PaperTrader("S", lambda b: -1, cost, RiskConfig(), guard=guard,
                         started_at=T("2026-10-05 09:00:00"))
@@ -161,3 +161,72 @@ def test_dense_run_total_entries_are_capped_by_daily_quota():
     assert 1 <= guard.entries <= 4                      # 被額度封頂(無額度時同情境有幾十筆)
     assert len(guard.rejections) > 50                   # 其餘訊號都被擋下
     assert guard.used <= limit
+
+
+# ---------------- 買賣兩腿都算(預設,保守) ----------------
+
+def test_both_legs_reserves_double_at_entry_and_cap_applies_to_the_sum():
+    g = CapitalGuard(100_000)                            # 預設:兩腿都算
+    assert g.count_both_legs is True
+    assert g.try_reserve("A", 40_000) is True             # 預留 4 萬買 + 4 萬賣 = 8 萬
+    assert g.used == 80_000
+    assert g.try_reserve("B", 40_000) is False            # 再 8 萬就 16 萬 > 10 萬
+    assert g.rejections[0].notional == 80_000
+    assert g.try_reserve("B", 10_000) is True             # 2 萬 + 2 萬 = 4 萬? 8 萬 + 2 萬 = 10 萬,剛好等於上限
+    assert g.used == 100_000
+
+
+def test_both_legs_exit_replaces_reservation_with_actual_exit_notional_without_refund():
+    g = CapitalGuard(1_000_000)
+    g.try_reserve("A", 40_000)                            # used 80k(含預留的出場 4 萬)
+    g.release("A", exit_notional=36_000)                  # 賣得比較低:換成實際 3.6 萬
+    assert g.used == 76_000                               # 只修正預留與實際的差額
+    g.try_reserve("B", 40_000)
+    g.release("B", exit_notional=44_000)                  # 賣得比較高:差額照實補記
+    assert g.used == 76_000 + 84_000
+    assert g.entries == 2
+
+
+def test_both_legs_exit_is_never_blocked_even_when_quota_is_fully_used():
+    """使用者的情境:額度用完就買賣都不行。所以進場時就預留賣出額度,進場後一定賣得掉。"""
+    guard = CapitalGuard(200_000)                         # 價格 100 x 1000 股:買 10 萬 + 賣 10 萬 = 剛好用完
+    a = _always_long_trader("A", guard, take_profit_pct=0.02)
+    feed(a, [("09:00:05", 100.0), ("09:01:05", 100.0)])   # 進場,額度用到 100%
+    assert a.position is not None and guard.used == pytest.approx(200_000)
+    feed(a, [("09:02:05", 105.0)])                        # 停利價 102.0:出場價(102)略高於預留金額
+    assert a.position is None and a.trades[0].exit_reason == "target"   # 出場沒有被額度擋下
+    assert guard.used >= 200_000                          # 額度沒有退還,且差額照實補記
+    b = _always_long_trader("B", guard)
+    feed(b, [("09:00:05", 100.0), ("09:01:05", 100.0)])
+    assert b.position is None and len(guard.rejections) >= 1   # 之後誰都不能再進場
+
+
+def test_both_legs_halves_the_number_of_possible_entries():
+    entry_only = CapitalGuard(300_000, count_both_legs=False)
+    both = CapitalGuard(300_000, count_both_legs=True)
+    n_entry = n_both = 0
+    while entry_only.try_reserve(f"E{n_entry}", 50_000):
+        n_entry += 1
+    while both.try_reserve(f"B{n_both}", 50_000):
+        n_both += 1
+    assert (n_entry, n_both) == (6, 3)                    # 30 萬 / 5 萬:6 次 vs 3 次
+
+
+def test_dense_run_both_legs_entries_capped():
+    import numpy as np
+    limit = 200_000                                       # 每次約 4.5 萬、兩腿約 9 萬 -> 全日最多 2 次
+    guard = CapitalGuard(limit)
+    traders = [PaperTrader(f"S{i}", _momentum, CostModel(),
+                           RiskConfig(stop_loss_pct=0.003, take_profit_pct=0.004, max_daily_loss=10 ** 9),
+                           guard=guard, started_at=T("2026-10-05 09:00:00")) for i in range(5)]
+    rng = np.random.default_rng(7)
+    idx = pd.date_range("2026-10-05 09:00", "2026-10-05 13:29", freq="1min")
+    paths = [np.round(45 * np.exp(np.cumsum(rng.normal(0, 0.0015, len(idx)))) * 20) / 20 for _ in traders]
+    for k, t in enumerate(idx):
+        for tr, path in zip(traders, paths):
+            tr.on_quote(t, float(path[k]), 1000 + k)
+    for tr in traders:
+        tr.finish()
+    assert sum(len(tr.trades) for tr in traders) == guard.entries
+    assert 1 <= guard.entries <= 2 and len(guard.rejections) > 50
+    assert guard.used <= limit * 1.05                     # 出場價差造成的少量超出(補記差額),不會失控

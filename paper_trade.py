@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--fee-discount", type=float, default=0.6)
     ap.add_argument("--capital", type=float, default=300000.0,
                     help="單日買賣額度(元):一天內所有進場金額累計不可超過此值,平倉不退還額度")
+    ap.add_argument("--quota-legs", choices=["both", "entry"], default="both",
+                    help="額度算法:both=買賣兩腿都占額度(保守,預設);entry=只算進場那一腿")
     ap.add_argument("--flush-every", type=float, default=300.0, help="定期存檔間隔(秒)")
     args = ap.parse_args()
     if args.interval < 5:
@@ -49,8 +51,9 @@ def main():
     log(f"開始模擬單 {args.symbols} market={args.market} interval={args.interval}s log={log.path}")
     cost, risk = CostModel(fee_discount=args.fee_discount), RiskConfig()
     started_at = pd.Timestamp.now(tz=live.TZ).tz_localize(None)
-    guard = CapitalGuard(args.capital)
-    log(f"單日買賣額度 {guard.limit:,.0f}(進場金額逐筆累計、平倉不退還);每筆 {risk.shares_per_trade} 股")
+    guard = CapitalGuard(args.capital, count_both_legs=(args.quota_legs == "both"))
+    log(f"單日買賣額度 {guard.limit:,.0f}({'買賣兩腿都算' if guard.count_both_legs else '只算進場'}、逐筆累計、平倉不退還);"
+        f"每筆 {risk.shares_per_trade} 股")
     traders = {s: PaperTrader(s, opening_range_breakout(args.or_minutes), cost, risk,
                               started_at=started_at, guard=guard, on_event=log)
                for s in args.symbols}

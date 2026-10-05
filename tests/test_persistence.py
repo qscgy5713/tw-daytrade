@@ -172,3 +172,23 @@ def test_paper_trade_script_default_capital_is_300k(monkeypatch, tmp_path):
     paper_trade.main()
     text = next((tmp_path / "logs").glob("paper_*.log")).read_text(encoding="utf-8")
     assert "單日買賣額度 300,000" in text and "今日已用 0" in text
+
+
+def test_paper_trade_script_quota_legs_option(monkeypatch, tmp_path):
+    def fake_poll(symbols, market, interval, handler, **kw):
+        pass
+
+    _run_script(monkeypatch, tmp_path, fake_poll, extra_argv=("--quota-legs", "entry"))
+    paper_trade.main()
+    text = next((tmp_path / "logs").glob("paper_*.log")).read_text(encoding="utf-8")
+    assert "只算進場" in text and "買賣兩腿都算" not in text
+
+
+def test_paper_trade_script_defaults_to_both_legs(monkeypatch, tmp_path):
+    def fake_poll(symbols, market, interval, handler, **kw):
+        pass
+
+    _run_script(monkeypatch, tmp_path, fake_poll)
+    paper_trade.main()
+    text = next((tmp_path / "logs").glob("paper_*.log")).read_text(encoding="utf-8")
+    assert "買賣兩腿都算" in text
