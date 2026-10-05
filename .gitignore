@@ -2,3 +2,4 @@
 __pycache__/
 *.parquet
 .pytest_cache/
+cache/

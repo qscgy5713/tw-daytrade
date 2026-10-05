@@ -41,8 +41,10 @@ class CostModel:
 
     def fill_price(self, price: float, side: str) -> float:
         """套用滑價:買貴賣便宜。side 為 'buy' 或 'sell'。"""
-        slip = tick_size(price) * self.slippage_ticks
-        return price + slip if side == "buy" else price - slip
+        if side == "buy":
+            return price + tick_size(price) * self.slippage_ticks
+        # 賣出往下走,在整數關卡(100、500、1000)要用下方級距的 tick
+        return price - tick_size(price - 1e-9) * self.slippage_ticks
 
     def round_trip_cost(self, entry: float, exit_: float, shares: int, direction: int) -> float:
         """一來一回的手續費加稅(不含滑價,滑價已反映在成交價)。

@@ -79,3 +79,25 @@ def test_journal_roundtrip(tmp_path):
     df = load_trades(tmp_path)
     assert path.exists() and len(df) == 1
     assert df.iloc[0]["net_pnl"] == pytest.approx(2200.0) and df.iloc[0]["exit_reason"] == "target"
+
+
+def test_poll_exits_with_warning_when_started_after_close():
+    logs, fetched = [], []
+    times = [T("2026-10-05 22:00:00", tz=live.TZ)] * 5
+    live.poll_loop(["2330"], "tse", 6, lambda q: None, now_fn=clock(times),
+                   fetch_fn=lambda s, m: fetched.append(1) or [], sleep_fn=lambda s: None,
+                   log=logs.append)
+    assert fetched == [] and any("已過收盤" in l for l in logs)
+
+
+def test_journal_merges_instead_of_overwriting(tmp_path):
+    t0 = T("2026-10-05 09:16:05")
+
+    def tr(sym):
+        return Trade(sym, 1, t0, t0 + pd.Timedelta(minutes=5), 100.0, 103.0, 1000, 3000.0, 800.0, "target")
+
+    save_trades([tr("2330")], "2026-10-05", tmp_path)   # 行程 A
+    save_trades([tr("2317")], "2026-10-05", tmp_path)   # 行程 B 不可蓋掉 A
+    save_trades([tr("2317")], "2026-10-05", tmp_path)   # 重複寫入不會多出重複列
+    df = load_trades(tmp_path)
+    assert sorted(df["symbol"].astype(str)) == ["2317", "2330"]

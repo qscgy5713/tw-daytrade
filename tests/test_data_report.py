@@ -185,3 +185,15 @@ def test_minute_partial_failure_keeps_finished_days(monkeypatch, tmp_path):
     monkeypatch.setattr(finmind.requests, "get", get2)
     df = finmind.fetch_minute("2330", "2026-09-01", "2026-09-02", token="t")
     assert calls == ["2026-09-02"] and len(df) == 2  # 只補缺的那天
+
+
+def test_max_drawdown_is_ordered_by_exit_time_across_symbols():
+    def tr(sym, net, exit_min):
+        t0 = pd.Timestamp("2026-10-05 09:30")
+        return Trade(sym, 1, t0, t0 + pd.Timedelta(minutes=exit_min), 100, 100, 1000, net, 0, "t")
+
+    # 逐檔串接:A 先賺後賠、B 先賠後賺;依時間排序後的權益曲線是 -500, -300, +200 ...
+    trades = [tr("A", 500, 10), tr("A", -300, 30), tr("B", -500, 5), tr("B", 700, 20)]
+    m = summarize(trades)
+    # 時間序:B-500(5) -> A+500(10) -> B+700(20) -> A-300(30);權益 -500,0,700,400;回撤 -500
+    assert m["max_drawdown"] == pytest.approx(-500)

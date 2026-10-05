@@ -83,6 +83,13 @@ def run_day(
         exit_price, reason, exit_i = None, "", entry_i
         for j in range(entry_i, n):
             bar = bars.iloc[j]
+            if bar.name.time() >= risk.force_close_at:
+                # 13:25 起連續撮合結束:以 13:25 前最後一根收盤價平倉,不再檢查停損停利
+                # (與模擬單一致;真實成交價在 13:30 集合競價,會有誤差)
+                last_continuous = bars["close"].iloc[j - 1]
+                exit_price = cost.fill_price(last_continuous, "sell" if direction == 1 else "buy")
+                reason, exit_i = "force_close", j
+                break
             # 進場那根 bar 也要檢查(開盤後同根觸及停損)
             hit = _exit_check(bar, direction, stop, target)
             if hit is not None:
@@ -92,7 +99,7 @@ def run_day(
                     raw, "sell" if direction == 1 else "buy")
                 exit_i = j
                 break
-            if bar.name.time() >= risk.force_close_at or j == n - 1:
+            if j == n - 1:  # 資料在 13:25 前就結束
                 exit_price = cost.fill_price(bar["close"], "sell" if direction == 1 else "buy")
                 reason, exit_i = "force_close", j
                 break

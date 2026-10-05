@@ -7,11 +7,12 @@ from twdt.backtest.engine import Trade
 
 
 def summarize(trades: Iterable[Trade]) -> dict:
-    rows = [{"date": t.entry_time.date(), "gross": t.gross_pnl, "cost": t.cost,
-             "net": t.net_pnl} for t in trades]
+    rows = [{"date": t.entry_time.date(), "exit_time": t.exit_time, "gross": t.gross_pnl,
+             "cost": t.cost, "net": t.net_pnl} for t in trades]
     if not rows:
         return {"trades": 0}
-    df = pd.DataFrame(rows)
+    # 多檔時成交是逐檔串起來的,必須依出場時間排序,權益曲線與回撤才有意義
+    df = pd.DataFrame(rows).sort_values("exit_time", kind="stable").reset_index(drop=True)
     # 以 0 為起點,否則第一筆就虧損時回撤會被漏算
     equity = pd.concat([pd.Series([0.0]), df["net"].cumsum()], ignore_index=True)
     drawdown = (equity - equity.cummax()).min()

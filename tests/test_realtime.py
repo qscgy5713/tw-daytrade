@@ -12,7 +12,7 @@ def test_parse_quote_ok_and_no_trade():
     q = parse_quote(item)
     assert q == {"symbol": "2330", "ts": T("2026-10-05 09:56:24"), "price": 2570.0,
                  "cum_volume": 11986}
-    assert parse_quote({**item, "z": "-"}) is None
+    assert parse_quote({**item, "z": "-"}) is None  # 頂層 z 為 '-' 且沒有 trade
     assert parse_quote({"c": "2330"}) is None
 
 
@@ -100,3 +100,31 @@ def test_save_day_merges_on_restart(monkeypatch, tmp_path):
     realtime.save_day("2330", second.to_frame(include_open_bar=True))
     df = realtime.load_minute("2330")
     assert list(df.index) == [T("2026-10-05 09:00"), T("2026-10-05 09:01"), T("2026-10-05 09:05")]
+
+
+def test_parse_quote_falls_back_to_nested_trade_price():
+    item = {"c": "2317", "d": "20261005", "t": "10:10:00", "z": "-", "v": "26277",
+            "trade": {"t": "10:09:35", "v": 1, "z": "255.0000"}}
+    q = parse_quote(item)
+    assert q["price"] == 255.0 and q["cum_volume"] == 26277
+    assert q["ts"] == T("2026-10-05 10:10:00")  # 時間用快照時間,量與價才對得起來
+    # trade 也沒有成交價:視為尚無成交
+    assert parse_quote({**item, "trade": {"t": "-", "z": "-"}}) is None
+    assert parse_quote({**item, "trade": None}) is None
+    # 頂層 z 有值時優先使用
+    assert parse_quote({**item, "z": "256.0"})["price"] == 256.0
+
+
+def test_save_day_merges_same_minute_across_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(realtime, "CACHE_DIR", tmp_path)
+    first = MinuteBarBuilder()
+    first.update(T("2026-10-05 10:00:05"), 100, 1000)
+    first.update(T("2026-10-05 10:00:30"), 103, 1020)   # 前半根: O100 H103 L100 C103 V20
+    realtime.save_day("2330", first.to_frame(include_open_bar=True))
+    second = MinuteBarBuilder()                          # 10:00:40 重啟
+    second.update(T("2026-10-05 10:00:40"), 99, 1030)
+    second.update(T("2026-10-05 10:00:55"), 101, 1050)  # 後半根: O99 H101 L99 C101 V0(首筆量不計)
+    realtime.save_day("2330", second.to_frame(include_open_bar=True))
+    row = realtime.load_minute("2330").iloc[0]
+    assert (row["open"], row["high"], row["low"], row["close"]) == (100, 103, 99, 101)
+    assert row["volume"] == 20 + 20

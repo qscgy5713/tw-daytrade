@@ -16,13 +16,22 @@ MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 CACHE_DIR = Path(os.environ.get("TWDT_CACHE", Path(__file__).resolve().parents[2] / "cache"))
 
 
-def parse_quote(item: dict) -> Optional[dict]:
-    """MIS 單檔報價 -> {symbol, ts, price, cum_volume};尚無成交(z 為 '-')回傳 None。"""
+def _last_price(item: dict) -> float:
+    """最新成交價。頂層 z 常是 '-'(該次更新沒帶成交價,但累計量 v 仍在增加),
+    此時改用巢狀的 trade.z(最近一筆成交價)。兩者都沒有才視為尚無成交。"""
     try:
-        price = float(item["z"])
+        return float(item["z"])
+    except (KeyError, ValueError, TypeError):
+        return float((item.get("trade") or {})["z"])
+
+
+def parse_quote(item: dict) -> Optional[dict]:
+    """MIS 單檔報價 -> {symbol, ts, price, cum_volume};尚無任何成交回傳 None。"""
+    try:
+        price = _last_price(item)
         cum = int(item["v"])
         ts = pd.Timestamp(f"{item['d'][:4]}-{item['d'][4:6]}-{item['d'][6:]} {item['t']}")
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
         return None
     return {"symbol": item["c"], "ts": ts, "price": price, "cum_volume": cum}
 
@@ -86,17 +95,55 @@ class MinuteBarBuilder:
         return df.astype(float)
 
 
+def _day_path(symbol: str, day) -> Path:
+    return CACHE_DIR / "realtime" / f"{symbol}_{day}.parquet"
+
+
+def _merge_minutes(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """合併舊檔與本次 session 的分鐘線。
+
+    同一分鐘跨越重啟時,新舊各只有半根 bar:open 取舊的、high/low 取極值、
+    close 取新的、量相加。
+    """
+    both = pd.concat([old, new])
+    return both.groupby(level=0).agg(open=("open", "first"), high=("high", "max"),
+                                     low=("low", "min"), close=("close", "last"),
+                                     volume=("volume", "sum")).sort_index()
+
+
+class DayRecorder:
+    """把某檔當天的分鐘線寫進 parquet,可在同一個 session 內反覆呼叫 flush()。
+
+    第一次 flush 時讀一次磁碟上既有的檔案當「基準」(前一個 session 留下的),
+    之後每次都以「基準 + 目前整份 builder 資料」重新寫入。基準不變,所以反覆 flush
+    不會把量重複相加。用暫存檔加 os.replace 原子寫入,寫到一半被中斷也不會弄壞舊檔。
+
+    限制:不要讓兩個行程同時記錄同一檔(各自的基準看不到對方的資料)。
+    """
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        self._baseline: Optional[pd.DataFrame] = None
+        self._baseline_loaded = False
+
+    def flush(self, df: pd.DataFrame) -> Optional[Path]:
+        if df.empty:
+            return None
+        path = _day_path(self.symbol, df.index[0].date())
+        if not self._baseline_loaded:
+            self._baseline = pd.read_parquet(path) if path.exists() else None
+            self._baseline_loaded = True
+        out = df if self._baseline is None else _merge_minutes(self._baseline, df)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".parquet.tmp")
+        out.to_parquet(tmp)
+        os.replace(tmp, path)
+        return path
+
+
 def save_day(symbol: str, df: pd.DataFrame) -> Optional[Path]:
-    if df.empty:
-        return None
-    path = CACHE_DIR / "realtime" / f"{symbol}_{df.index[0].date()}.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        # 當天中途重啟時合併舊資料,同一分鐘以新的為準,不覆寫掉先前記錄
-        df = pd.concat([pd.read_parquet(path), df])
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-    df.to_parquet(path)
-    return path
+    """單次寫入(與既有檔合併)。同一個 session 內要反覆存檔請改用 DayRecorder。"""
+    return DayRecorder(symbol).flush(df)
 
 
 def load_minute(symbol: str) -> pd.DataFrame:

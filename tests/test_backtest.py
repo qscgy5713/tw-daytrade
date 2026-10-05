@@ -134,3 +134,22 @@ def test_orb_tz_aware_and_single_fire():
     sig = opening_range_breakout(15)
     assert sig(bars.iloc[:16]) == 1
     assert sig(bars.iloc[:17]) == 0  # 已突破過,不重複觸發
+
+
+def test_sell_slippage_uses_tick_below_boundary():
+    m = CostModel(slippage_ticks=1)
+    assert m.fill_price(100, "sell") == pytest.approx(99.9)   # 100 以下的 tick 是 0.1
+    assert m.fill_price(500, "sell") == pytest.approx(499.5)
+    assert m.fill_price(1000, "sell") == pytest.approx(999.0)
+    assert m.fill_price(100, "buy") == pytest.approx(100.5)   # 買進往上,用 100 以上的 tick
+
+
+def test_force_close_uses_last_bar_before_1325_and_skips_stops():
+    idx = pd.date_range("2026-10-05 13:21", periods=9, freq="1min")  # 13:21 ~ 13:29
+    closes = [100.0, 100.0, 100.0, 100.0, 100.5, 90.0, 90.0, 90.0, 90.0]  # 13:25 起暴跌
+    bars = pd.DataFrame({"open": closes, "high": closes, "low": closes,
+                         "close": closes, "volume": 1}, index=idx)
+    fired = iter([1] + [0] * 20)
+    t = run_day("X", bars, lambda b: next(fired), NO_SLIP, RiskConfig(no_entry_after=time(13, 24)))[0]
+    assert t.exit_reason == "force_close"          # 13:25 起不再檢查停損
+    assert t.exit_price == pytest.approx(100.0)    # 13:24 那根收盤,不是 13:25 的 90
