@@ -6,6 +6,7 @@ import pytest
 import paper_trade
 from twdt import live, logutil
 from twdt.data import realtime
+from twdt.data import stats as stats_mod
 from twdt.data.realtime import DayRecorder, MinuteBarBuilder
 from twdt.paper import journal
 from twdt.paper.engine import PaperTrader
@@ -88,6 +89,7 @@ def _run_script(monkeypatch, tmp_path, feed, extra_argv=()):
     monkeypatch.setattr(realtime, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(journal, "JOURNAL_DIR", tmp_path / "paper")
     monkeypatch.setattr(logutil, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(stats_mod, "STATS_DIR", tmp_path / "stats")
     monkeypatch.setattr(sys, "argv", ["paper_trade.py", "2330", "--flush-every", "0", *extra_argv])
     real_trader = PaperTrader
     # 腳本用牆上時鐘當 started_at;測試固定成 09:00 才不會被「盤中啟動」規則停用

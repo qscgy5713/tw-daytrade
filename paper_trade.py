@@ -11,12 +11,23 @@ import pandas as pd
 from twdt import live
 from twdt.backtest.costs import CostModel
 from twdt.data import realtime
+from twdt.data.stats import QuoteStats
 from twdt.logutil import file_logger
 from twdt.paper.engine import PaperTrader
 from twdt.paper.journal import save_trades
 from twdt.report.metrics import summarize
 from twdt.risk.rules import RiskConfig
 from twdt.signals.rules import opening_range_breakout
+
+
+def report_stats(stats, session_started, log):
+    """統計只是輔助資訊:任何失敗只記警告,不可影響收尾存檔或掩蓋原本的錯誤。"""
+    try:
+        for line in stats.format_lines():
+            log(line)
+        log(f"密度明細: {stats.save(session_started)}")
+    except Exception as e:
+        log(f"[warn] 報價密度統計失敗 {type(e).__name__}: {e}")
 
 
 def main():
@@ -39,17 +50,27 @@ def main():
                               started_at=started_at, on_event=log) for s in args.symbols}
     day = pd.Timestamp.now(tz=live.TZ).strftime("%Y-%m-%d")
     recorders = {s: realtime.DayRecorder(s) for s in args.symbols}
+    stats = QuoteStats()
+    session_started = started_at
+
+    def on_quote(q):
+        stats.observe(q)
+        traders[q["symbol"]].on_quote(q["ts"], q["price"], q["cum_volume"])
 
     def flush():
         # 分鐘線與「已結束的成交」定期落地;成交紀錄以 (代號, 進出場時間) 去重,可重複寫入
         for s, t in traders.items():
             recorders[s].flush(t.builder.to_frame(include_open_bar=True))
         save_trades([tr for t in traders.values() for tr in t.trades], day)
+        try:
+            stats.save(session_started)
+        except Exception as e:
+            log(f"[warn] 統計存檔失敗 {type(e).__name__}: {e}")
 
     interrupted = False
     try:
         live.poll_loop(args.symbols, args.market, args.interval,
-                       lambda q: traders[q["symbol"]].on_quote(q["ts"], q["price"], q["cum_volume"]),
+                       on_quote,
                        log=log, flush_fn=flush, flush_every=args.flush_every)
     except KeyboardInterrupt:
         interrupted = True
@@ -65,6 +86,7 @@ def main():
             all_trades += t.trades
         path = save_trades(all_trades, day)
         log(f"成交紀錄: {path}")
+        report_stats(stats, session_started, log)
         for k, v in summarize(all_trades).items():
             log(f"{k:>20}: {v:,.2f}" if isinstance(v, float) else f"{k:>20}: {v}")
 

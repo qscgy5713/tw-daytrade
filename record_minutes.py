@@ -7,9 +7,22 @@
 """
 import argparse
 
+import pandas as pd
+
 from twdt import live
 from twdt.data import realtime
+from twdt.data.stats import QuoteStats
 from twdt.logutil import file_logger
+
+
+def report_stats(stats, session_started, log):
+    """統計只是輔助資訊:任何失敗只記警告,不可影響收尾存檔或掩蓋原本的錯誤。"""
+    try:
+        for line in stats.format_lines():
+            log(line)
+        log(f"密度明細: {stats.save(session_started)}")
+    except Exception as e:
+        log(f"[warn] 報價密度統計失敗 {type(e).__name__}: {e}")
 
 
 def main():
@@ -26,14 +39,24 @@ def main():
     log(f"開始記錄 {args.symbols} market={args.market} interval={args.interval}s log={log.path}")
     builders = {s: realtime.MinuteBarBuilder() for s in args.symbols}
     recorders = {s: realtime.DayRecorder(s) for s in args.symbols}
+    stats = QuoteStats()
+    session_started = pd.Timestamp.now(tz=live.TZ).tz_localize(None)
+
+    def on_quote(q):
+        stats.observe(q)
+        builders[q["symbol"]].update(q["ts"], q["price"], q["cum_volume"])
 
     def flush():
         for s, b in builders.items():
             recorders[s].flush(b.to_frame(include_open_bar=True))
+        try:
+            stats.save(session_started)
+        except Exception as e:
+            log(f"[warn] 統計存檔失敗 {type(e).__name__}: {e}")
 
     try:
         live.poll_loop(args.symbols, args.market, args.interval,
-                       lambda q: builders[q["symbol"]].update(q["ts"], q["price"], q["cum_volume"]),
+                       on_quote,
                        log=log, flush_fn=flush, flush_every=args.flush_every)
     except KeyboardInterrupt:
         log("中斷,存檔中…")
@@ -45,6 +68,7 @@ def main():
     for s, b in builders.items():
         path = recorders[s].flush(b.to_frame(include_open_bar=True))
         log(f"{s}: {len(b.bars)} 根 bar -> {path}")
+    report_stats(stats, session_started, log)
 
 
 if __name__ == "__main__":
