@@ -1,0 +1,6 @@
+pandas
+numpy
+pyarrow
+requests
+urllib3<2  # 系統 Python 的 LibreSSL 2.8.3 不支援 urllib3 v2
+pytest

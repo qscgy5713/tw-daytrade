@@ -18,10 +18,10 @@ def test_parse_quote_ok_and_no_trade():
 
 def test_builder_ohlcv_and_volume_delta():
     b = MinuteBarBuilder()
-    b.update(T("2026-10-05 09:00:10"), 100, 1000)  # 第一筆:既有累計量不計入
-    b.update(T("2026-10-05 09:00:30"), 102, 1010)
-    b.update(T("2026-10-05 09:00:50"), 99, 1015)
-    b.update(T("2026-10-05 09:01:05"), 101, 1020)
+    b.update(T("2026-10-05 09:30:10"), 100, 1000)  # 盤中啟動:既有累計量不計入
+    b.update(T("2026-10-05 09:30:30"), 102, 1010)
+    b.update(T("2026-10-05 09:30:50"), 99, 1015)
+    b.update(T("2026-10-05 09:31:05"), 101, 1020)
     df = b.to_frame()
     assert len(df) == 1
     r = df.iloc[0]
@@ -73,3 +73,30 @@ def test_fetch_quotes_filters_no_trade(monkeypatch):
     monkeypatch.setattr(realtime.requests, "get", lambda *a, **k: R())
     qs = realtime.fetch_quotes(["2330", "2317"])
     assert [q["symbol"] for q in qs] == ["2317"]
+
+
+def test_opening_auction_volume_counted_when_started_at_open():
+    b = MinuteBarBuilder()
+    b.update(T("2026-10-05 09:00:05"), 100, 800)
+    b.update(T("2026-10-05 09:00:30"), 101, 850)
+    assert b.to_frame(include_open_bar=True).iloc[0]["volume"] == 850
+
+
+def test_builder_ignores_cross_day_quotes():
+    b = MinuteBarBuilder()
+    b.update(T("2026-10-05 13:29:10"), 100, 5000)
+    b.update(T("2026-10-06 09:00:10"), 105, 100)  # 隔天報價:忽略,不補上千根平盤
+    assert len(b.to_frame(include_open_bar=True)) == 1
+
+
+def test_save_day_merges_on_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(realtime, "CACHE_DIR", tmp_path)
+    first = MinuteBarBuilder()
+    first.update(T("2026-10-05 09:00:10"), 100, 10)
+    first.update(T("2026-10-05 09:01:10"), 101, 20)
+    realtime.save_day("2330", first.to_frame(include_open_bar=True))
+    second = MinuteBarBuilder()  # 中途重啟
+    second.update(T("2026-10-05 09:05:10"), 103, 50)
+    realtime.save_day("2330", second.to_frame(include_open_bar=True))
+    df = realtime.load_minute("2330")
+    assert list(df.index) == [T("2026-10-05 09:00"), T("2026-10-05 09:01"), T("2026-10-05 09:05")]

@@ -10,7 +10,9 @@ import pandas as pd
 
 from twdt.data import realtime
 
-OPEN, CLOSE = dtime(9, 0), dtime(13, 30)
+# 13:30 收盤集合競價撮合,加上報價延遲約 5 秒,多等到 13:32 才收工
+OPEN, CLOSE = dtime(9, 0), dtime(13, 32)
+TZ = "Asia/Taipei"  # 不依賴本機時區
 
 
 def main():
@@ -23,12 +25,21 @@ def main():
         raise SystemExit("--interval 不可小於 5 秒(報價本身延遲 5 秒,過密易被限流)")
 
     builders = {s: realtime.MinuteBarBuilder() for s in args.symbols}
+    today = pd.Timestamp.now(tz=TZ).date()
+    polls_without_today = 0
     try:
-        while pd.Timestamp.now().time() < CLOSE:
-            if pd.Timestamp.now().time() >= OPEN:
+        while pd.Timestamp.now(tz=TZ).time() < CLOSE:
+            if pd.Timestamp.now(tz=TZ).time() >= OPEN:
                 try:
-                    for q in realtime.fetch_quotes(args.symbols, args.market):
+                    quotes = realtime.fetch_quotes(args.symbols, args.market)
+                    fresh = [q for q in quotes
+                             if q["ts"].date() == today and q["symbol"] in builders]
+                    # 假日或盤前 MIS 可能回前一交易日的舊報價,不可混進今天的檔
+                    for q in fresh:
                         builders[q["symbol"]].update(q["ts"], q["price"], q["cum_volume"])
+                    polls_without_today = 0 if fresh else polls_without_today + 1
+                    if polls_without_today == 10:  # 約 1 分鐘都沒有今天的報價
+                        print("[warn] 連續 10 次沒有今天的報價,今天可能休市或代號/市場(tse/otc)錯誤")
                 except Exception as e:  # 單次失敗不中斷整天記錄
                     print(f"[warn] {type(e).__name__}: {e}")
             time.sleep(args.interval)

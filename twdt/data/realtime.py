@@ -5,6 +5,7 @@
 - volume 單位為「張」(累計量 v 的差值),與 FinMind 的股數不同,混用時需換算。
 """
 import os
+from datetime import time as dtime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -46,15 +47,21 @@ class MinuteBarBuilder:
 
     def update(self, ts: pd.Timestamp, price: float, cum_volume: int) -> None:
         minute = ts.floor("min")
-        # 同一分鐘內累計量只會增加;時間倒退或重複的報價直接忽略
-        if self._cur is not None and minute < self._cur["time"]:
+        # 時間倒退或跨日的報價直接忽略(跨日會讓缺口補平填出上千根平盤 K)
+        if self._cur is not None and (minute < self._cur["time"]
+                                      or ts.date() != self._cur["time"].date()):
             return
-        delta = 0 if self._last_cum is None else max(0, cum_volume - self._last_cum)
-        self._last_cum = cum_volume if self._last_cum is None else max(self._last_cum, cum_volume)
+        if self._last_cum is None:
+            # 09:00 就開始記錄時,累計量全是開盤集合競價,歸入第一根 bar;
+            # 盤中才啟動則累計量是之前已發生的量,不算進來
+            delta = cum_volume if minute.time() == dtime(9, 0) else 0
+            self._last_cum = cum_volume
+        else:
+            delta = max(0, cum_volume - self._last_cum)
+        self._last_cum = max(self._last_cum, cum_volume)
         if self._cur is None:
-            # 第一筆的累計量是盤中已累積量,不算進這根 bar
             self._cur = {"time": minute, "open": price, "high": price, "low": price,
-                         "close": price, "volume": 0}
+                         "close": price, "volume": delta}
             return
         if minute > self._cur["time"]:
             self.bars.append(self._cur)
@@ -84,6 +91,10 @@ def save_day(symbol: str, df: pd.DataFrame) -> Optional[Path]:
         return None
     path = CACHE_DIR / "realtime" / f"{symbol}_{df.index[0].date()}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        # 當天中途重啟時合併舊資料,同一分鐘以新的為準,不覆寫掉先前記錄
+        df = pd.concat([pd.read_parquet(path), df])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
     df.to_parquet(path)
     return path
 
