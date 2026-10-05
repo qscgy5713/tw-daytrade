@@ -24,10 +24,14 @@ def _get(dataset: str, symbol: str, start: str, end: str, token: Optional[str]) 
     if token:
         params["token"] = token
     resp = requests.get(API_URL, params=params, timeout=30)
-    resp.raise_for_status()
-    body = resp.json()
-    if body.get("status") != 200:
-        raise FinMindError(f"{dataset} {symbol}: {body.get('msg')}")
+    # 不用 raise_for_status():它會吃掉回應內容,且例外訊息會帶出含 token 的完整 URL
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if resp.status_code != 200 or body.get("status") != 200:
+        raise FinMindError(
+            f"{dataset} {symbol} {start}: HTTP {resp.status_code}, msg={body.get('msg')!r}")
     return pd.DataFrame(body["data"])
 
 

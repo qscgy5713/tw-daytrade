@@ -7,11 +7,9 @@ from twdt.report.metrics import summarize
 
 
 class FakeResp:
-    def __init__(self, body):
+    def __init__(self, body, status_code=200):
         self._body = body
-
-    def raise_for_status(self):
-        pass
+        self.status_code = status_code
 
     def json(self):
         return self._body
@@ -85,3 +83,13 @@ def test_summarize():
 
 def test_drawdown_counts_first_loss():
     assert summarize([_trade(-300, 0, 5), _trade(100, 0, 6)])["max_drawdown"] == pytest.approx(-300)
+
+
+def test_http_400_reports_msg_without_leaking_token(monkeypatch, tmp_path):
+    monkeypatch.setattr(finmind, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(finmind.requests, "get", lambda *a, **k: FakeResp(
+        {"status": 400, "msg": "token invalid"}, status_code=400))
+    with pytest.raises(finmind.FinMindError) as e:
+        finmind.fetch_minute("2330", "2026-10-05", "2026-10-05", token="SECRET123")
+    assert "token invalid" in str(e.value) and "400" in str(e.value)
+    assert "SECRET123" not in str(e.value)
